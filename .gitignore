@@ -2,7 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+*.pth
+*.ipynb
 # C extensions
 *.so
 
@@ -12,6 +13,8 @@ build/
 develop-eggs/
 dist/
 downloads/
+data/
+checkpoints/
 eggs/
 .eggs/
 lib/
