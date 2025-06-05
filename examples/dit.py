@@ -3,43 +3,80 @@ import torch.nn as nn
 from einops import rearrange, repeat
 import numpy as np 
 from vit import AttentionHead, MHA, FFN 
+from diffusion_cifar10 import FourierFeatures
 
 # Helper functions for 2d positional encoding -- taken from CS294 notebook  
-def get_2d_sincos_pos_embed_from_grid(embed_dim, grid):
-    assert embed_dim % 2 == 0
+def get_2d_sincos_pos_embed_from_grid(embed_dim, grid_shape):
+    """Return 2-D sinusoidal positional embeddings as a torch tensor.
 
-    # For each image, the positional encoding is a hidden_size dimensional vector 
-    # the first hidden_size // 2 dimensions encode the height position, the second half encode the width position 
-    # we treat these as "independent sinusoidal channels" 
-    emb_h = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[0])  # (H*W, D/2)
-    emb_w = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid[1])  # (H*W, D/2)
+    Args:
+        embed_dim (int): total embedding dimension (must be even).
+        grid_shape (tuple or sequence of tensors): either a tuple (H, W) or
+            a tuple of coordinate tensors produced by torch.meshgrid.
 
-    emb = np.concatenate([emb_h, emb_w], axis=1) # (H*W, D)
+    Returns:
+        torch.Tensor with shape (H*W, embed_dim).
+    """
+    assert embed_dim % 2 == 0, "embed_dim must be even."
+
+    # Build coordinate grids if integer sizes are provided
+    if isinstance(grid_shape, tuple) and isinstance(grid_shape[0], int):
+        H, W = grid_shape
+        if 'indexing' in torch.meshgrid.__code__.co_varnames:
+            grid_y, grid_x = torch.meshgrid(
+                torch.arange(H, dtype=torch.float32),
+                torch.arange(W, dtype=torch.float32),
+                indexing='ij'
+            )
+        else:
+            grid_y, grid_x = torch.meshgrid(
+                torch.arange(H, dtype=torch.float32),
+                torch.arange(W, dtype=torch.float32)
+            )
+    else:
+        # grid_shape already contains coordinate tensors (y, x)
+        grid_y, grid_x = grid_shape
+
+    emb_y = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid_y)
+    emb_x = get_1d_sincos_pos_embed_from_grid(embed_dim // 2, grid_x)
+
+    emb = torch.cat([emb_y, emb_x], dim=1)  # (H*W, D)
     return emb
 
 
 def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
-    assert embed_dim % 2 == 0
-    omega = np.arange(embed_dim // 2, dtype=np.float64)
-    omega /= embed_dim / 2.
-    omega = 1. / 10000**omega  # (D/2,)
+    """Compute 1-D sinusoidal positional embeddings using torch.
 
-    pos = pos.reshape(-1)  # (M,)
-    out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
+    Args:
+        embed_dim (int): total embedding dimension (must be even).
+        pos (torch.Tensor): positions (any shape) on **current device**.
 
-    emb_sin = np.sin(out) # (M, D/2)
-    emb_cos = np.cos(out) # (M, D/2)
+    Returns:
+        torch.Tensor of shape (*pos.shape, embed_dim) flattened as (M, D).
+    """
+    assert embed_dim % 2 == 0, "embed_dim must be even."
+    print("embed_dim: ", embed_dim)
 
-    emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
+    # Ensure tensor type / device are inherited from `pos`.
+    dtype  = pos.dtype if torch.is_floating_point(pos) else torch.float32
+    device = pos.device
+    print("dtype: ", dtype)
+
+    omega = torch.arange(embed_dim // 2, dtype=dtype, device=device)
+    omega = 1.0 / (float(10000) ** (omega / (embed_dim / 2)))  # (D/2,)
+    print("omega: ", omega)
+    pos = pos.reshape(-1).to(dtype)  # (M,)
+    out = torch.einsum('m,d->md', pos, omega)  # (M, D/2)
+
+    emb = torch.cat([out.sin(), out.cos()], dim=1)  # (M, D)
     return emb
 
 def get_2d_sincos_pos_embed(embed_dim, grid_size):
-    grid_h = np.arange(grid_size, dtype=np.float32)
-    grid_w = np.arange(grid_size, dtype=np.float32)
-    grid = np.meshgrid(grid_w, grid_h)  # here w goes first
-    grid = np.stack(grid, axis=0)
-
-    grid = grid.reshape([2, 1, grid_size, grid_size])
+    """Convenience wrapper that builds a square H=W=grid_size embedding."""
+    # Use torch operations so the result is a tensor.
+    grid_h = torch.arange(grid_size, dtype=torch.float32)
+    grid_w = torch.arange(grid_size, dtype=torch.float32)
+    grid = torch.meshgrid(grid_w, grid_h)  # note: width, height order matches original comment
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
     return pos_embed
 
@@ -86,10 +123,12 @@ class DITPatchEmbeddings(nn.Module):
 
         # 2d sinusoidal posiitonal encoding 
         # this gets us (num_patches, hidden_size) positional encodings 
+        print("hi")
 
         pos_enc = get_2d_sincos_pos_embed_from_grid(self.hidden_size, (num_along_h, num_along_w)
-        )
-        patches = patches + pos_enc 
+        ).to(device=patches.device, dtype=patches.dtype)  # (L, D)
+
+        patches = patches + pos_enc.unsqueeze(0)  # broadcast over batch
 
         return patches
 
@@ -98,7 +137,7 @@ class DITPatchEmbeddings(nn.Module):
 
 
 class DITLayer(nn.Module): 
-    def __init__(self, hidden_size, num_heads, dropout = 0.3): 
+    def __init__(self, hidden_size, intermediate_size, num_heads, dropout = 0.3): 
         super().__init__()
         self.attention = MHA(hidden_size, num_heads, dropout)
         self.ffn = FFN(hidden_size, intermediate_size, dropout)
@@ -116,8 +155,8 @@ class DITLayer(nn.Module):
             nn.Linear(hidden_size, 6 * hidden_size)
         )
 
-        self.cond_proj.weight.data.normal_(mean=0.0, std=0.02)
-        self.cond_proj.bias.data.zero_()
+        # self.cond_proj.weight.data.normal_(mean=0.0, std=0.02)
+        # self.cond_proj.bias.data.zero_()
     def forward(self, x, cond): 
         # x is (B, num_patches, hidden_size)
         # cond is (B, hidden_size)
@@ -160,8 +199,8 @@ class DITDecoder(nn.Module):
             nn.SiLU(), 
             nn.Linear(hidden_size, 2 * hidden_size)
         )
-        self.cond_proj.weight.data.normal_(mean=0.0, std=0.02)
-        self.cond_proj.bias.data.zero_()
+        # self.cond_proj.weight.data.normal_(mean=0.0, std=0.02)
+        # self.cond_proj.bias.data.zero_()
         
         self.output_proj = nn.Linear(hidden_size, patch_height * patch_width * num_channels)
         self.output_proj.weight.data.normal_(mean=0.0, std=0.02)
@@ -195,9 +234,12 @@ class DIT(nn.Module):
         self.config = config 
 
         self.patch_embeddings = DITPatchEmbeddings(config["image_height"], config["image_width"], config["patch_height"], config["patch_width"], config["num_channels"], config["hidden_size"])
-        self.layers = nn.ModuleList([DITLayer(config["hidden_size"], config["num_heads"], config["dropout"]) for _ in range(config["num_layers"])])
+        self.layers = nn.ModuleList([DITLayer(config["hidden_size"], config["intermediate_size"], config["num_heads"], config["dropout"]) for _ in range(config["num_layers"])])
 
         self.output = nn.Linear(config["hidden_size"], config["num_classes"])
+
+        self.timestep_embed = FourierFeatures(1, config["timestep_embedding_size"], std=0.2)
+
 
         # project timestep 
         self.timestep_proj = nn.Sequential(
@@ -210,13 +252,13 @@ class DIT(nn.Module):
             nn.Linear(config["conditioning_size"], config["hidden_size"])
         )
 
-        self.cond_proj.weight.data.normal_(mean=0.0, std=0.02)
-        self.cond_proj.bias.data.zero_()
+        # self.cond_proj.weight.data.normal_(mean=0.0, std=0.02)
+        # self.cond_proj.bias.data.zero_()
 
-        self.timestep_proj.weight.data.normal_(mean=0.0, std=0.02)
-        self.timestep_proj.bias.data.zero_()
+        # self.timestep_proj.weight.data.normal_(mean=0.0, std=0.02)
+        # self.timestep_proj.bias.data.zero_()
 
-        self.layers = nn.ModuleList([DITLayer(config["hidden_size"], config["num_heads"], config["dropout"]) for _ in range(config["num_layers"])])
+        self.layers = nn.ModuleList([DITLayer(config["hidden_size"], config["intermediate_size"], config["num_heads"], config["dropout"]) for _ in range(config["num_layers"])])
         self.decoder = DITDecoder(config["hidden_size"], config["patch_height"], config["patch_width"], config["num_channels"])
 
         if config["training"]: 
@@ -228,9 +270,25 @@ class DIT(nn.Module):
 
     # Remember t includes the class embedding too! 
     def forward(self, x, t, cond): 
+        
+        t = self.timestep_embed(t)
+        print("x shape: ", x.shape)
+        print("t shape: ", t.shape)
+        print("cond shape: ", cond.shape)
+
         x = self.patch_embeddings(x)
+        print("patch embeddings okay") 
+
         t = self.timestep_proj(t)
-        cond = self.cond_proj(cond)
+        print("timestep proj okay")
+
+        cond = self.cond_proj(cond.to(torch.float32))
+        print("cond proj okay")
+
+        print("after x shape: ", x.shape)
+        print("after t shape: ", t.shape)
+        print("after cond shape: ", cond.shape)
+
         t = t + cond 
 
         for layer in self.layers: 

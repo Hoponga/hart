@@ -1,4 +1,3 @@
-
 # trying to get metal on my laptop working with a simple diffusion model for CIFAR-10 
 
 
@@ -372,5 +371,59 @@ if __name__ == "__main__":
             save()
     except KeyboardInterrupt:
         pass
+
+
+@torch.no_grad()
+def sample_eps(model, x, steps, eta, classes):
+    """Draw samples from a model trained to predict \hat{\varepsilon}_t (noise).
+
+    The parameter `eta` interpolates between deterministic DDIM (eta=0) and
+    fully–stochastic DDPM (eta=1).  Values in-between produce a blend of the
+    two.  The function mirrors the logic of `sample` above but adapts it to a
+    network that outputs the noise directly instead of the velocity.
+    """
+
+    ts = x.new_ones([x.shape[0]])
+
+    # Create the noise schedule (same as DDPM)
+    t = torch.linspace(1, 0, steps + 1)[:-1]
+    log_snrs = get_ddpm_schedule(t)
+    alphas, sigmas = get_alphas_sigmas(log_snrs)
+
+    for i in trange(steps):
+        # Predict \hat{epsilon}_t
+        with torch.autocast(device_type="mps", dtype=torch.bfloat16):
+            eps = model(x, ts * log_snrs[i], classes).float()
+
+        # Reconstruct \hat{x}_0 from the predicted noise
+        x0_pred = (x - sigmas[i] * eps) / alphas[i]
+
+        if i < steps - 1:
+            # DDIM/DDPM variance splitting
+            ddim_sigma = eta * (sigmas[i + 1]**2 / sigmas[i]**2).sqrt() * \
+                (1 - alphas[i]**2 / alphas[i + 1]**2).sqrt()
+            adjusted_sigma = (sigmas[i + 1]**2 - ddim_sigma**2).sqrt()
+
+            # Deterministic component of the step
+            x = x0_pred * alphas[i + 1] + eps * adjusted_sigma
+
+            # Stochastic component (only if eta>0)
+            if eta:
+                x += torch.randn_like(x) * ddim_sigma
+
+    # After the final step `x0_pred` is the denoised image.
+    return x0_pred
+
+
+# Convenience wrappers ---------------------------------------------------------
+
+def sample_ddpm_eps(model, x, steps, classes):
+    """DDPM sampling for an epsilon-prediction network (eta = 1)."""
+    return sample_eps(model, x, steps, eta=1.0, classes=classes)
+
+
+def sample_ddim_eps(model, x, steps, classes):
+    """DDIM sampling for an epsilon-prediction network (eta = 0)."""
+    return sample_eps(model, x, steps, eta=0.0, classes=classes)
 
 
