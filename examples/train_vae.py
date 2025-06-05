@@ -8,7 +8,7 @@ from torchvision import datasets, transforms
 from torchvision.utils import save_image
 from tqdm import tqdm
 
-from examples.vae_dit import VAE
+from vae import VAE
 
 
 def kl_divergence(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -85,6 +85,8 @@ def train(args):
             running_bce += bce_loss.item() * data.size(0)
             running_kl += kl.item() * data.size(0)
 
+            
+
             pbar.set_postfix({"loss": f"{loss.item():.3f}", "bce": f"{bce_loss.item():.3f}", "kl": f"{kl.item():.3f}"})
 
         train_size = len(train_loader.dataset)
@@ -105,20 +107,23 @@ def train(args):
         test_total /= len(test_loader.dataset)
         print(f"Validation loss: {test_total:.4f}")
 
-   
-        # if test_total < best_test_loss:
-        #     best_test_loss = test_total
-        #     Path(args.save_dir).mkdir(parents=True, exist_ok=True)
-        #     ckpt_path = Path(args.save_dir) / "vae_cifar10.pt"
-        #     torch.save(
-        #         {
-        #             "epoch": epoch,
-        #             "model_state": model.state_dict(),
-        #             "optimizer_state": optimizer.state_dict(),
-        #         },
-        #         ckpt_path,
-        #     )
-        #     print(f"Saved checkpoint to {ckpt_path}")
+        # -------------------------------------------------------------
+        # Save best checkpoint
+        # -------------------------------------------------------------
+        if test_total < best_test_loss:
+            best_test_loss = test_total
+            Path(args.save_dir).mkdir(parents=True, exist_ok=True)
+            ckpt_path = Path(args.save_dir) / "vae_cifar10.pt"
+            torch.save(
+                {
+                    "epoch": epoch,
+                    "model_state": model.state_dict(),
+                    "optimizer_state": optimizer.state_dict(),
+                    "best_val_loss": best_test_loss,
+                },
+                ckpt_path,
+            )
+            print(f"Saved best VAE checkpoint to {ckpt_path}")
 
         # Save reconstruction samples every N epochs
         if epoch % args.sample_interval == 0 or epoch == 1:
@@ -142,7 +147,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--beta", type=float, default=0.5, help="Weight on KL term")
+    parser.add_argument("--beta", type=float, default=1, help="Weight on KL term")
     parser.add_argument("--latent_dim", type=int, default=4, help="Number of latent channels")
     parser.add_argument("--kl_anneal_epochs", type=int, default=0, help="Epochs over which to linearly anneal KL weight to beta")
     parser.add_argument("--sample_interval", type=int, default=5, help="Save reconstructions every N epochs")

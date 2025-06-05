@@ -378,7 +378,7 @@ def sample_eps(model, x, steps, eta, classes):
     """Draw samples from a model trained to predict \hat{\varepsilon}_t (noise).
 
     The parameter `eta` interpolates between deterministic DDIM (eta=0) and
-    fully–stochastic DDPM (eta=1).  Values in-between produce a blend of the
+    fully-stochastic DDPM (eta=1).  Values in-between produce a blend of the
     two.  The function mirrors the logic of `sample` above but adapts it to a
     network that outputs the noise directly instead of the velocity.
     """

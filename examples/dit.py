@@ -55,16 +55,16 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
         torch.Tensor of shape (*pos.shape, embed_dim) flattened as (M, D).
     """
     assert embed_dim % 2 == 0, "embed_dim must be even."
-    print("embed_dim: ", embed_dim)
+    #print("embed_dim: ", embed_dim)
 
     # Ensure tensor type / device are inherited from `pos`.
     dtype  = pos.dtype if torch.is_floating_point(pos) else torch.float32
     device = pos.device
-    print("dtype: ", dtype)
+    #print("dtype: ", dtype)
 
     omega = torch.arange(embed_dim // 2, dtype=dtype, device=device)
     omega = 1.0 / (float(10000) ** (omega / (embed_dim / 2)))  # (D/2,)
-    print("omega: ", omega)
+    #   print("omega: ", omega)
     pos = pos.reshape(-1).to(dtype)  # (M,)
     out = torch.einsum('m,d->md', pos, omega)  # (M, D/2)
 
@@ -82,9 +82,6 @@ def get_2d_sincos_pos_embed(embed_dim, grid_size):
 
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
-
-
 
 class DITPatchEmbeddings(nn.Module):
     """
@@ -123,7 +120,7 @@ class DITPatchEmbeddings(nn.Module):
 
         # 2d sinusoidal posiitonal encoding 
         # this gets us (num_patches, hidden_size) positional encodings 
-        print("hi")
+        #print("hi")
 
         pos_enc = get_2d_sincos_pos_embed_from_grid(self.hidden_size, (num_along_h, num_along_w)
         ).to(device=patches.device, dtype=patches.dtype)  # (L, D)
@@ -131,7 +128,6 @@ class DITPatchEmbeddings(nn.Module):
         patches = patches + pos_enc.unsqueeze(0)  # broadcast over batch
 
         return patches
-
 
 
 
@@ -163,7 +159,7 @@ class DITLayer(nn.Module):
 
         # project cond into 6 * hidden_size 
         cond_out = self.cond_proj(cond).chunk(6, dim = 1) 
-        scale_attn_input, shift_attn_input, gate_attn, scale_ffn_input, shift_ffn_output, gate_ffn = cond_out
+        scale_attn_input, shift_attn_input, gate_attn, scale_ffn_input, shift_ffn_input, gate_ffn = cond_out
         
         '''
         h = LayerNorm(hidden_size, elementwise_affine=False)(x)
@@ -177,9 +173,13 @@ class DITLayer(nn.Module):
         res = x 
         x = self.norm1(x) 
         x = modulate(x, shift_attn_input, scale_attn_input)
-        attn_output = res + gate_attn.unsqueeze(1) * self.attention(x)
+        #   print("gate_attn: ", gate_attn.shape)
+        #print("x: ", x.shape)
+        attn_output, _ = self.attention(x)
+        #print("attn_output: ", attn_output.shape)
+        attn_output = res + gate_attn.unsqueeze(1) * attn_output 
 
-        res = modulate(self.norm2(attn_output), shift_ffn_output, scale_ffn_output)
+        res = modulate(self.norm2(attn_output), shift_ffn_input, scale_ffn_input)
         res = attn_output + gate_ffn.unsqueeze(1) * self.ffn(res)
 
 
@@ -201,6 +201,7 @@ class DITDecoder(nn.Module):
         )
         # self.cond_proj.weight.data.normal_(mean=0.0, std=0.02)
         # self.cond_proj.bias.data.zero_()
+        self.norm1 = nn.LayerNorm(hidden_size, eps = 1e-6, elementwise_affine = False)
         
         self.output_proj = nn.Linear(hidden_size, patch_height * patch_width * num_channels)
         self.output_proj.weight.data.normal_(mean=0.0, std=0.02)
@@ -240,7 +241,7 @@ class DIT(nn.Module):
 
         self.timestep_embed = FourierFeatures(1, config["timestep_embedding_size"], std=0.2)
 
-
+        self.num_patches = config["image_height"] // config["patch_height"] * config["image_width"] // config["patch_width"]
         # project timestep 
         self.timestep_proj = nn.Sequential(
             nn.SiLU(), 
@@ -270,24 +271,16 @@ class DIT(nn.Module):
 
     # Remember t includes the class embedding too! 
     def forward(self, x, t, cond): 
-        
         t = self.timestep_embed(t)
-        print("x shape: ", x.shape)
-        print("t shape: ", t.shape)
-        print("cond shape: ", cond.shape)
-
         x = self.patch_embeddings(x)
-        print("patch embeddings okay") 
-
+        #print("patch embeddings okay") 
         t = self.timestep_proj(t)
-        print("timestep proj okay")
-
+        #print("timestep proj okay")
         cond = self.cond_proj(cond.to(torch.float32))
-        print("cond proj okay")
-
-        print("after x shape: ", x.shape)
-        print("after t shape: ", t.shape)
-        print("after cond shape: ", cond.shape)
+        #print("cond proj okay")
+        #print("after x shape: ", x.shape)
+        #print("after t shape: ", t.shape)
+        #print("after cond shape: ", cond.shape)
 
         t = t + cond 
 
@@ -297,8 +290,10 @@ class DIT(nn.Module):
         x = self.decoder(x, t)
         # now x is of shape (B, num_patches, patch_height*patch_width*num_channels)
         # reconstruct the image by rearranging from (num_patches, patch_data) to (c, h, w) 
+        #print("x shape: ", x.shape)
+        #print("desired shape: ", (self.num_patches, self.config["patch_height"] * self.config["patch_width"] * self.config["num_channels"]))
 
-        x = rearrange(x, "b (h w) (p1 p2 c) -> b c (h p1) (w p2)", p1=self.config["patch_height"], p2=self.config["patch_width"])
+        x = rearrange(x, "b (h w) (p1 p2 c) -> b c (h p1) (w p2)", h = self.config["image_height"] // self.config["patch_height"], w = self.config["image_width"] // self.config["patch_width"], p1=self.config["patch_height"], p2=self.config["patch_width"])
 
         return x 
         
