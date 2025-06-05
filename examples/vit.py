@@ -3,11 +3,8 @@ import torch
 import torch.nn as nn 
 
 
+# (B, C, H, W) -> (B, num_patches, hidden_size) 
 class PatchEmbeddings(nn.Module):
-    """
-    Convert the image into patches and then project them into a vector space.
-    """
-
     def __init__(self, config):
         super().__init__()
         self.image_size = config["image_size"]
@@ -51,10 +48,6 @@ class Embeddings(nn.Module):
         return self.dropout(x)
     
 class AttentionHead(nn.Module):
-    """
-    A single attention head.
-    This module is used in the MultiHeadAttention module.
-    """
     def __init__(self, hidden_size, attention_head_size, dropout, bias=True):
         super().__init__()
         self.hidden_size = hidden_size 
@@ -76,6 +69,7 @@ class AttentionHead(nn.Module):
         return (torch.matmul(attention_scores, value), attention_scores)
 
 
+# todo: implement MLA or flash? 
 class MHA(nn.Module): 
     def __init__(self, hidden_size, num_heads, dropout, bias=True): 
         super().__init__()
@@ -150,10 +144,7 @@ class ViT(nn.Module):
         # The output of the encoder is (batch_size, num_patches + 1, hidden_size)
         # Why? Because we have a [CLS] token in the embeddings. Then, every transformer block returns one value for every token. 
         # So, we have one value for the [CLS] token and one value for every other token. 
-        # We want to classify the image, so we take the value for the [CLS] token. 
-        # This is the output of the encoder. 
-        # We also want to return the attention probabilities for each transformer block. 
-        # This is the output of the encoder. 
+        
         
         x, attention_probs = self.encoder(x)
         x = self.classifier(x[:, 0])

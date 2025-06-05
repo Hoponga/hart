@@ -1,5 +1,13 @@
 # Training latent diffusion model on CIFAR-10 
 
+# todo: 
+# - get latent diffusion to actually work, fix the VAE (although i think maybe the original issue was not the vae but just the size of the DiT) 
+# - if above doesn't work, just use diffusers pre-trained VAE
+# - speed things up -- ts hella slow 
+# - get flash attention kernel working, optimize DiT layers a little more and see what can be better ported to metal 
+
+# once everything works, try on A100 with larger dataset 
+
 import torch 
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset 
@@ -162,18 +170,18 @@ if __name__ == "__main__":
         "num_channels": 3, 
         "hidden_size": 512,
         "num_heads": 8, 
-        "num_layers": 8, 
+        "num_layers": 10, 
         "dropout": 0.1, 
         "timestep_embedding_size": 32, 
         "conditioning_size": 10, 
         "training": True, 
         "num_classes": 10,
-        "intermediate_size": 512, 
+        "intermediate_size": 768, 
     }
     dit = DIT(config)
 
     # load dit 
-    dit_ckpt_path = os.path.join("checkpoints", "big_dit_epoch_0050.pth")
+    dit_ckpt_path = os.path.join("checkpoints", "big_dit_epoch_0035.pth")
     if os.path.exists(dit_ckpt_path):
         ckpt = torch.load(dit_ckpt_path, map_location="cpu")
         dit.load_state_dict(ckpt["dit"])
@@ -242,7 +250,7 @@ if __name__ == "__main__":
                 running_loss = 0.0
                 print(f"[epoch {epoch} iter {it+1}] loss={avg:.4f}")
 
-        # ------------------ validation ------------------------------------
+
         dit.eval()
         with torch.no_grad():
             val_loss = 0.0
@@ -268,14 +276,14 @@ if __name__ == "__main__":
                 num_samples=class_sample.size(0),
                 device=device,
                 steps=500,
-                eta=torch.tensor([1.0], device=device),
+                eta=torch.tensor([1.0], device=device), # ddpm 
                 classes=class_sample,
             )
             grid_name = os.path.join(samples_dir, f"big_dit_epoch_{epoch:04d}.png")
             save_image(imgs, grid_name, nrow=10, normalize=True, value_range=(-1, 1))
             print(f"wrote samples to {grid_name}")
 
-        # ------------------ checkpoint -------------------------------------
+  
         if epoch % checkpoint_every == 0 or epoch == epochs:
             ckpt_path = os.path.join(ckpt_dir, f"big_dit_epoch_{epoch:04d}.pth")
             torch.save({

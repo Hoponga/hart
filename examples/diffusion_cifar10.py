@@ -1,5 +1,9 @@
 # trying to get metal on my laptop working with a simple diffusion model for CIFAR-10 
 
+# Reference code taken from: cant even find the repo :( 
+
+# these guys use a velocity based sampler that i dont get, train_vae_dit.py uses normal eps prediction 
+
 
 from contextlib import contextmanager
 from copy import deepcopy

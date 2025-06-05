@@ -1,3 +1,5 @@
+// work in progress flash attention kernel in metal to speed up the DiT 
+
 #include <metal_stdlib>
 using namespace metal;
 
