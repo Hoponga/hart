@@ -31,24 +31,21 @@ def eval_loss(model, rng, reals, classes):
     """
 
     device = reals.device
-    #       print(classes.shape)
 
-
-    # 1. Draw uniformly-distributed continuous timesteps t ∈ (0,1).
+    #print(classes.shape)
     t = rng.draw(reals.shape[0])[:, 0].to(device)
 
-    # 2. Convert to log-SNR schedule parameters.
+    
     log_snrs = get_ddpm_schedule(t)                    # (B,)
     alphas, sigmas = get_alphas_sigmas(log_snrs)       # (B,), (B,)
 
     # 3. Mix clean image with random Gaussian noise.
     alphas = alphas[:, None, None, None]               # (B,1,1,1)
     sigmas = sigmas[:, None, None, None]
-    noise   = torch.randn_like(reals)                  # ε ~ N(0, I)
-    noised_reals = reals * alphas + noise * sigmas     # x_t
+    noise   = torch.randn_like(reals)          
+    noised_reals = reals * alphas + noise * sigmas   
 
-    # 4. Predict ε̂_t and compute simple MSE.
-    # convert to one hot 
+    # convert toone hot 
     classes = F.one_hot(classes, num_classes=10)
 
     with torch.autocast(device_type="mps", dtype=torch.bfloat16):
@@ -60,42 +57,29 @@ def eval_loss(model, rng, reals, classes):
     loss = (eps_pred - noise).pow(2).mean([1, 2, 3]).mean()  # average over batch & pixels
     return loss
 
-def train(model, vae, dataloader, optimizer, device, epochs): 
-    model.train() 
-    vae.train() 
-
-    for epoch in range(epochs): 
-        for i, (reals, classes) in enumerate(tqdm(train_dl)):
-            opt.zero_grad()
-            reals = reals.to(device)
-            classes = classes.to(device)
-
-            # Evaluate the loss
-            loss = eval_loss(model, rng, reals, classes)
-
-            # Do the optimizer step and EMA update
-            scaler.scale(loss).backward()
-            scaler.step(opt)
-            ema_update(model, model_ema, 0.95 if epoch < 20 else ema_decay)
-            scaler.update()
-
-            if i % 50 == 0:
-                tqdm.write(f'Epoch: {epoch}, iteration: {i}, loss: {loss.item():g}')
 
 
 @torch.no_grad()
 def latent_sample(model, vae, num_samples, device, steps, eta, classes, input_img = None): 
     model.eval() 
-    vae.eval() 
+    if vae: 
+        vae.eval() 
 
     dit_input = None 
-    if input_img is not None: 
+    if input_img is not None and vae: 
+
         dit_input, _, _ = vae.encode(input_img.to(device))
     else: 
-        dit_input = torch.randn(num_samples, vae.latent_dim, 8, 8).to(device)
+        if vae: 
+            dit_input = torch.randn(num_samples, vae.latent_dim, 8, 8).to(device)
+        else: 
+            dit_input = torch.randn(num_samples, 3, 32, 32).to(device)
 
     latent_out = sample_eps(model, dit_input, steps, eta, classes)
-    img_out = vae.decode(latent_out)
+    if vae: 
+        img_out = vae.decode(latent_out)
+    else: 
+        img_out = latent_out 
 
     return img_out 
 
@@ -150,8 +134,8 @@ if __name__ == "__main__":
     train_dataset = datasets.CIFAR10(root = "data", train = True, download = True, transform = transform)
     test_dataset = datasets.CIFAR10(root = "data", train = False, download = True, transform = transform)
 
-    train_loader = DataLoader(train_dataset, batch_size = 128, shuffle = True)
-    test_loader = DataLoader(test_dataset, batch_size = 128, shuffle = False)
+    train_loader = DataLoader(train_dataset, batch_size = 256, shuffle = True)
+    test_loader = DataLoader(test_dataset, batch_size = 256, shuffle = False)
 
     # Load the VAE and DIT models 
     vae = VAE()
@@ -171,16 +155,16 @@ if __name__ == "__main__":
         print("Warning: Pretrained VAE checkpoint not found. Using randomly initialised VAE.")
 
     config = {
-        "image_height": 8, 
-        "image_width": 8, 
+        "image_height": 32, 
+        "image_width": 32, 
         "patch_height": 4, 
         "patch_width": 4, 
-        "num_channels": vae.latent_dim, 
-        "hidden_size": 128,
-        "num_heads": 4, 
-        "num_layers": 5, 
+        "num_channels": 3, 
+        "hidden_size": 512,
+        "num_heads": 8, 
+        "num_layers": 8, 
         "dropout": 0.1, 
-        "timestep_embedding_size": 16, 
+        "timestep_embedding_size": 32, 
         "conditioning_size": 10, 
         "training": True, 
         "num_classes": 10,
@@ -188,8 +172,17 @@ if __name__ == "__main__":
     }
     dit = DIT(config)
 
+    # load dit 
+    dit_ckpt_path = os.path.join("checkpoints", "big_dit_epoch_0050.pth")
+    if os.path.exists(dit_ckpt_path):
+        ckpt = torch.load(dit_ckpt_path, map_location="cpu")
+        dit.load_state_dict(ckpt["dit"])
+        print(f"Loaded pretrained DIT from {dit_ckpt_path}")
+    else:
+        print("Warning: Pretrained DIT checkpoint not found. Using randomly initialised DIT.")
+
     # Load the optimizer 
-    optimizer = torch.optim.Adam(dit.parameters(), lr = 1e-4)
+    optimizer = torch.optim.Adam(dit.parameters(), lr = 3e-4)
 
     # Load the device 
     device = torch.device("mps")
@@ -199,17 +192,16 @@ if __name__ == "__main__":
     print(f"Total number of parameters: {total_params}")
     
     
-    # ------------------------------------------------------------------
-    #  TRAIN / VALIDATE / SAMPLE LOOP
-    # ------------------------------------------------------------------
+    # train, val, sample loop 
 
     dit.to(device)
     vae.to(device)
+    identity_vae = nn.Identity() 
 
-    epochs          = 50          # total number of training epochs
-    log_every       = 100         # iterations between console logs
-    sample_every    = 5           # epochs between sample image dumps
-    checkpoint_every= 5           # epochs between checkpoint writes
+    epochs          = 100  
+    log_every       = 100 # iterations between console logs
+    sample_every    = 5 # epochs between sample image dumps
+    checkpoint_every= 5   # epochs between checkpoint writes
     samples_dir     = "samples"
     ckpt_dir        = "checkpoints"
 
@@ -218,6 +210,8 @@ if __name__ == "__main__":
     pathlib.Path(ckpt_dir).mkdir(parents=True, exist_ok=True)
 
     scaler = torch.amp.GradScaler()
+
+    # what tthe other guy used 
     rng    = torch.quasirandom.SobolEngine(1, scramble=True)
 
     for epoch in range(1, epochs + 1):
@@ -228,13 +222,13 @@ if __name__ == "__main__":
             images = images.to(device)
             labels = labels.to(device)
 
-            # --- encode images to VAE latent space (no grad) -----------------
-            with torch.no_grad():
+            # for latent difusion: 
+            # with torch.no_grad():
 
-                latents, _, _ = vae.encode(images)   # (B, latent_dim, 8, 8)
+            #     latents, _, _ = identity_vae(images)   # (B, latent_dim, 8, 8)
 
-            # --- forward & backward ----------------------------------------
-            loss = eval_loss(dit, rng, latents, labels)
+    
+            loss = eval_loss(dit, rng, images, labels)
 
             optimizer.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()
@@ -256,13 +250,12 @@ if __name__ == "__main__":
             for images, labels in test_loader:
                 images, labels = images.to(device), labels.to(device)
                 latents, _, _  = vae.encode(images)
-                loss           = eval_loss(dit, rng, latents, labels)
+                loss           = eval_loss(dit, rng, images, labels)
                 val_loss      += loss.item() * images.size(0)
                 n_val         += images.size(0)
             val_loss /= n_val
         print(f"[epoch {epoch}] validation loss = {val_loss:.4f}")
 
-        # ------------------ sample & save ----------------------------------
         if epoch % sample_every == 0 or epoch == 1:
             dit.eval()
             class_sample = torch.arange(10, device=device).repeat_interleave(8, 0)  # 80 samples
@@ -271,20 +264,20 @@ if __name__ == "__main__":
             print(class_sample.shape)
             imgs = latent_sample(
                 dit,
-                vae,
+                None, # if vae = None, we just use the raw images rather than latent space 
                 num_samples=class_sample.size(0),
                 device=device,
-                steps=250,
-                eta=torch.tensor([0.0], device=device),
+                steps=500,
+                eta=torch.tensor([1.0], device=device),
                 classes=class_sample,
             )
-            grid_name = os.path.join(samples_dir, f"epoch_{epoch:04d}.png")
+            grid_name = os.path.join(samples_dir, f"big_dit_epoch_{epoch:04d}.png")
             save_image(imgs, grid_name, nrow=10, normalize=True, value_range=(-1, 1))
             print(f"wrote samples to {grid_name}")
 
         # ------------------ checkpoint -------------------------------------
         if epoch % checkpoint_every == 0 or epoch == epochs:
-            ckpt_path = os.path.join(ckpt_dir, f"dit_epoch_{epoch:04d}.pth")
+            ckpt_path = os.path.join(ckpt_dir, f"big_dit_epoch_{epoch:04d}.pth")
             torch.save({
                 "epoch": epoch,
                 "dit": dit.state_dict(),
